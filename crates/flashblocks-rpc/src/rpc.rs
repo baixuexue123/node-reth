@@ -14,7 +14,10 @@ use arc_swap::Guard;
 use jsonrpsee::{
     core::{async_trait, RpcResult},
     proc_macros::rpc,
+    PendingSubscriptionSink,
 };
+use jsonrpsee::core::SubscriptionResult;
+use serde_json::value::RawValue;
 use jsonrpsee_types::error::INVALID_PARAMS_CODE;
 use jsonrpsee_types::ErrorObjectOwned;
 use op_alloy_network::Optimism;
@@ -43,6 +46,12 @@ pub trait FlashblocksAPI {
     fn get_pending_blocks(&self) -> Guard<Option<Arc<PendingBlocks>>>;
 
     fn subscribe_to_flashblocks(&self) -> broadcast::Receiver<Arc<PendingBlocks>>;
+}
+
+/// Flashblocks subscription API for WebSocket subscriptions
+pub trait FlashblocksSubscriptionAPI {
+    /// Subscribe to new flashblocks
+    fn subscribe_to_new_flashblocks(&self) -> SubscriptionResult;
 }
 
 pub trait PendingBlocksAPI {
@@ -137,6 +146,13 @@ pub trait EthApiOverride {
 
     #[method(name = "getLogs")]
     async fn get_logs(&self, filter: Filter) -> RpcResult<Vec<Log>>;
+}
+
+#[cfg_attr(not(test), rpc(server, namespace = "flashblocks"))]
+#[cfg_attr(test, rpc(server, client, namespace = "flashblocks"))]
+pub trait FlashblocksApi {
+    #[subscription(name = "subscribe", item = String)]
+    async fn subscribe_to_new_flashblocks(&self) -> SubscriptionResult;
 }
 
 #[derive(Debug)]
@@ -520,6 +536,36 @@ where
         all_logs.extend(deduped_pending_logs);
 
         Ok(all_logs)
+    }
+}
+
+#[async_trait]
+impl<Eth, FB> FlashblocksApiServer for EthApiExt<Eth, FB>
+where
+    Eth: FullEthApi<NetworkTypes = Optimism> + Send + Sync + 'static,
+    FB: FlashblocksAPI + Send + Sync + 'static,
+{
+    async fn subscribe_to_new_flashblocks(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
+        let mut receiver = self.flashblocks_state.subscribe_to_flashblocks();
+
+        let mut sink = pending.accept().await?;
+
+        tokio::spawn(async move {
+            while let Ok(pending_blocks) = receiver.recv().await {
+                let flashblocks = pending_blocks.get_flashblocks();
+
+                // Send only the latest flashblock
+                if let Some(latest_flashblock) = flashblocks.last() {
+                    if let Ok(json_str) = serde_json::to_string(latest_flashblock) {
+                        if let Ok(raw_value) = RawValue::from_string(json_str) {
+                            let _ = sink.try_send(raw_value);
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
     }
 }
 

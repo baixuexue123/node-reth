@@ -34,7 +34,7 @@ pub struct Metadata {
     pub block_number: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flashblock {
     pub payload_id: PayloadId,
     pub index: u64,

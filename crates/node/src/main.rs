@@ -7,7 +7,7 @@ use reth::version::{
 use reth_exex::ExExEvent;
 use std::sync::Arc;
 
-use base_reth_flashblocks_rpc::rpc::EthApiOverrideServer;
+use base_reth_flashblocks_rpc::rpc::{EthApiOverrideServer, FlashblocksApiServer};
 use base_reth_flashblocks_rpc::state::FlashblocksState;
 use base_reth_flashblocks_rpc::subscription::FlashblocksSubscriber;
 use base_reth_transaction_tracing::transaction_tracing_exex;
@@ -152,10 +152,21 @@ fn main() {
                         let api_ext = EthApiExt::new(
                             ctx.registry.eth_api().clone(),
                             ctx.registry.eth_handlers().filter.clone(),
-                            fb,
+                            fb.clone(),
                         );
 
-                        ctx.modules.replace_configured(api_ext.into_rpc())?;
+                        // Register EthApiOverride
+                        let eth_override_rpc = <EthApiExt<_, _> as EthApiOverrideServer>::into_rpc(api_ext);
+                        ctx.modules.replace_configured(eth_override_rpc)?;
+
+                        // Register FlashblocksApi
+                        let api_ext2 = EthApiExt::new(
+                            ctx.registry.eth_api().clone(),
+                            ctx.registry.eth_handlers().filter.clone(),
+                            fb.clone(),
+                        );
+                        let flashblocks_rpc = <EthApiExt<_, _> as FlashblocksApiServer>::into_rpc(api_ext2);
+                        ctx.modules.merge_configured(flashblocks_rpc)?;
                     } else {
                         info!(message = "flashblocks integration is disabled");
                     }
