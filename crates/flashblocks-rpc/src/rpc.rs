@@ -6,6 +6,7 @@ use crate::pending_blocks::PendingBlocks;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::map::foldhash::{HashSet, HashSetExt};
 use alloy_primitives::{Address, TxHash, U256};
+use alloy_provider::network::TransactionResponse;
 use alloy_rpc_types::simulate::{SimBlock, SimulatePayload, SimulatedBlock};
 use alloy_rpc_types::state::{EvmOverrides, StateOverride, StateOverridesBuilder};
 use alloy_rpc_types::BlockOverrides;
@@ -556,10 +557,18 @@ where
 
                 // Send only the latest flashblock
                 if let Some(latest_flashblock) = flashblocks.last() {
+                    let block_number = latest_flashblock.metadata.block_number;
+
+                    // Get transaction hashes for this block
+                    let transactions = pending_blocks.get_transactions_for_block(block_number);
+                    let tx_hashes: Vec<String> = transactions.iter()
+                        .map(|tx| tx.tx_hash().to_string())
+                        .collect();
+
                     let simplified = serde_json::json!({
-                        "block_number": latest_flashblock.metadata.block_number,
+                        "block_number": block_number,
                         "index": latest_flashblock.index,
-                        "transactions": latest_flashblock.diff.transactions,
+                        "transactions": tx_hashes,
                         "receipts": latest_flashblock.metadata.receipts,
                     });
 
