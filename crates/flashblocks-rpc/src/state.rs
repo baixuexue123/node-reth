@@ -397,7 +397,7 @@ where
         let canonical_block = earliest_block_number - 1;
 
         // Try to get the header with retries - the canonical block might not be fully committed yet
-        // Use exponential backoff: 5ms, 10ms, 20ms, 40ms, 80ms
+        // Use exponential backoff with max 100ms: 10ms, 20ms, 40ms, 80ms, 100ms
         let mut last_block_header = None;
         let max_retries = 5;
         for attempt in 0..max_retries {
@@ -415,7 +415,8 @@ where
                 }
                 None => {
                     if attempt < max_retries - 1 {
-                        let delay_ms = 5 * (1 << attempt); // Exponential backoff: 5, 10, 20, 40, 80 ms
+                        // Exponential backoff: 10, 20, 40, 80, but cap at 100ms
+                        let delay_ms = std::cmp::min(10 * (1 << attempt), 100);
                         debug!(
                             message = "canonical block header not yet available, retrying",
                             canonical_block = canonical_block,
