@@ -554,11 +554,13 @@ where
             while let Ok(pending_blocks) = receiver.recv().await {
                 let flashblocks = pending_blocks.get_flashblocks();
 
-                // Send only the latest flashblock block number and index
+                // Send only the latest flashblock
                 if let Some(latest_flashblock) = flashblocks.last() {
                     let simplified = serde_json::json!({
                         "block_number": latest_flashblock.metadata.block_number,
                         "index": latest_flashblock.index,
+                        "transactions": latest_flashblock.diff.transactions,
+                        "receipts": latest_flashblock.metadata.receipts,
                     });
 
                     if let Ok(json_str) = serde_json::to_string(&simplified) {
