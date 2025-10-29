@@ -619,15 +619,17 @@ where
                         }
 
                         // Create receipt with filtered logs
+                        let status = match receipt {
+                            OpReceipt::Legacy(r) => r.status.coerce_status(),
+                            OpReceipt::Eip2930(r) => r.status.coerce_status(),
+                            OpReceipt::Eip1559(r) => r.status.coerce_status(),
+                            OpReceipt::Eip7702(r) => r.status.coerce_status(),
+                            OpReceipt::Deposit(r) => r.inner.status.coerce_status(),
+                        };
+
                         let receipt_with_filtered_logs = serde_json::json!({
                             "logs": filtered_logs,
-                            "status": match receipt {
-                                OpReceipt::Legacy(r) => r.status,
-                                OpReceipt::Eip2930(r) => r.status,
-                                OpReceipt::Eip1559(r) => r.status,
-                                OpReceipt::Eip7702(r) => r.status,
-                                OpReceipt::Deposit(r) => r.inner.status,
-                            },
+                            "status": if status { "0x1" } else { "0x0" },
                             "cumulative_gas_used": match receipt {
                                 OpReceipt::Legacy(r) => r.cumulative_gas_used,
                                 OpReceipt::Eip2930(r) => r.cumulative_gas_used,
