@@ -5,7 +5,7 @@ use crate::metrics::Metrics;
 use crate::pending_blocks::PendingBlocks;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::map::foldhash::{HashSet, HashSetExt};
-use alloy_primitives::{Address, TxHash, U256};
+use alloy_primitives::{Address, TxHash, U256, B256};
 use alloy_rpc_types::simulate::{SimBlock, SimulatePayload, SimulatedBlock};
 use alloy_rpc_types::state::{EvmOverrides, StateOverride, StateOverridesBuilder};
 use alloy_rpc_types::BlockOverrides;
@@ -25,6 +25,7 @@ use op_alloy_rpc_types::OpTransactionRequest;
 use reth::providers::CanonStateSubscriptions;
 use reth::rpc::eth::EthFilter;
 use reth::rpc::server_types::eth::EthApiError;
+use reth_optimism_primitives::OpReceipt;
 use reth_rpc_eth_api::helpers::EthState;
 use reth_rpc_eth_api::helpers::EthTransactions;
 use reth_rpc_eth_api::helpers::{EthBlocks, EthCall};
@@ -152,7 +153,7 @@ pub trait EthApiOverride {
 #[cfg_attr(test, rpc(server, client, namespace = "flashblocks"))]
 pub trait FlashblocksApi {
     #[subscription(name = "subscribe", item = String)]
-    async fn subscribe_to_new_flashblocks(&self) -> SubscriptionResult;
+    async fn subscribe_to_new_flashblocks(&self, addresses: Option<Vec<Address>>, topics: Option<Vec<Vec<B256>>>) -> SubscriptionResult;
 }
 
 #[derive(Debug)]
@@ -545,7 +546,7 @@ where
     Eth: FullEthApi<NetworkTypes = Optimism> + Send + Sync + 'static,
     FB: FlashblocksAPI + Send + Sync + 'static,
 {
-    async fn subscribe_to_new_flashblocks(&self, pending: PendingSubscriptionSink) -> SubscriptionResult {
+    async fn subscribe_to_new_flashblocks(&self, pending: PendingSubscriptionSink, addresses: Option<Vec<Address>>, topics: Option<Vec<Vec<B256>>>) -> SubscriptionResult {
         let mut receiver = self.flashblocks_state.subscribe_to_flashblocks();
 
         let mut sink = pending.accept().await?;
@@ -556,7 +557,90 @@ where
 
                 // Send only the latest flashblock
                 if let Some(latest_flashblock) = flashblocks.last() {
-                    // Get transaction hashes directly from receipts keys
+                    // Filter logs in receipts based on addresses and topics
+                    let mut filtered_receipts = serde_json::Map::new();
+
+                    for (tx_hash, receipt) in &latest_flashblock.metadata.receipts {
+                        // Extract logs from OpReceipt variants
+                        let receipt_logs = match receipt {
+                            OpReceipt::Legacy(r) => &r.logs,
+                            OpReceipt::Eip2930(r) => &r.logs,
+                            OpReceipt::Eip1559(r) => &r.logs,
+                            OpReceipt::Eip7702(r) => &r.logs,
+                            OpReceipt::Deposit(r) => &r.inner.logs,
+                        };
+
+                        // Filter logs for this receipt
+                        let mut filtered_logs = Vec::new();
+                        for log in receipt_logs {
+                            let mut matches = true;
+
+                            // Filter by addresses
+                            if let Some(ref addrs) = addresses {
+                                if !addrs.is_empty() && !addrs.contains(&log.address) {
+                                    matches = false;
+                                }
+                            }
+
+                            // Filter by topics - check all topic positions
+                            if matches {
+                                if let Some(ref topic_filters) = topics {
+                                    let log_topics = log.topics();
+
+                                    // If the filtered topics is greater than the amount of topics in logs, skip
+                                    if topic_filters.len() > log_topics.len() {
+                                        matches = false;
+                                    } else {
+                                        // Check each topic position
+                                        for (i, sub) in topic_filters.iter().enumerate() {
+                                            // Empty rule set == wildcard, skip
+                                            if sub.is_empty() {
+                                                continue;
+                                            }
+
+                                            // Check if log's topic at position i matches any in the filter
+                                            if let Some(log_topic) = log_topics.get(i) {
+                                                if !sub.contains(log_topic) {
+                                                    matches = false;
+                                                    break;
+                                                }
+                                            } else {
+                                                matches = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if matches {
+                                filtered_logs.push(log);
+                            }
+                        }
+
+                        // Create receipt with filtered logs
+                        let receipt_with_filtered_logs = serde_json::json!({
+                            "logs": filtered_logs,
+                            "status": match receipt {
+                                OpReceipt::Legacy(r) => r.status,
+                                OpReceipt::Eip2930(r) => r.status,
+                                OpReceipt::Eip1559(r) => r.status,
+                                OpReceipt::Eip7702(r) => r.status,
+                                OpReceipt::Deposit(r) => r.inner.status,
+                            },
+                            "cumulative_gas_used": match receipt {
+                                OpReceipt::Legacy(r) => r.cumulative_gas_used,
+                                OpReceipt::Eip2930(r) => r.cumulative_gas_used,
+                                OpReceipt::Eip1559(r) => r.cumulative_gas_used,
+                                OpReceipt::Eip7702(r) => r.cumulative_gas_used,
+                                OpReceipt::Deposit(r) => r.inner.cumulative_gas_used,
+                            },
+                        });
+
+                        filtered_receipts.insert(tx_hash.to_string(), receipt_with_filtered_logs);
+                    }
+
+                    // Get transaction hashes from receipts keys
                     let tx_hashes: Vec<String> = latest_flashblock.metadata.receipts
                         .keys()
                         .map(|hash| hash.to_string())
@@ -566,7 +650,7 @@ where
                         "block_number": latest_flashblock.metadata.block_number,
                         "index": latest_flashblock.index,
                         "transactions": tx_hashes,
-                        "receipts": latest_flashblock.metadata.receipts,
+                        "receipts": filtered_receipts,
                     });
 
                     if let Ok(json_str) = serde_json::to_string(&simplified) {
