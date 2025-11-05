@@ -18,7 +18,10 @@ use url::Url;
 use crate::metrics::Metrics;
 
 /// Interval of liveness check of upstream, in milliseconds.
-pub const PING_INTERVAL_MS: u64 = 500;
+pub const PING_INTERVAL_MS: u64 = 5000;
+
+/// Number of missed pongs before reconnecting
+pub const MAX_MISSED_PONGS: u32 = 3;
 
 /// Max duration of backoff before reconnecting to upstream.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(10);
@@ -87,7 +90,7 @@ where
                         info!(message = "WebSocket connection established");
 
                         let mut ping_interval = interval(Duration::from_millis(PING_INTERVAL_MS));
-                        let mut awaiting_pong_resp = false;
+                        let mut missed_pongs = 0u32;
 
                         let (mut write, mut read) = ws_stream.split();
 
@@ -122,7 +125,7 @@ where
                                                 ?data,
                                                 "Received pong from upstream"
                                             );
-                                            awaiting_pong_resp = false
+                                            missed_pongs = 0
                                         }
                                         Err(e) => {
                                             metrics.upstream_errors.increment(1);
@@ -136,12 +139,14 @@ where
                                     }
                                 },
                                 _ = ping_interval.tick() => {
-                                    if awaiting_pong_resp {
+                                    if missed_pongs >= MAX_MISSED_PONGS {
                                           warn!(
                                             target: "flashblocks_rpc::subscription",
                                             ?backoff,
+                                            missed_pongs,
                                             timeout_ms = PING_INTERVAL_MS,
-                                            "No pong response from upstream, reconnecting",
+                                            "No pong response from upstream after {} attempts, reconnecting",
+                                            missed_pongs
                                         );
 
                                         backoff = sleep(&metrics, backoff).await;
@@ -163,7 +168,7 @@ where
                                         backoff = sleep(&metrics, backoff).await;
                                         break 'conn;
                                     }
-                                    awaiting_pong_resp = true
+                                    missed_pongs += 1
                                 }
                             }
                         }
