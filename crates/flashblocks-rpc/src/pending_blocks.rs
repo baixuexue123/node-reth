@@ -12,6 +12,7 @@ use op_alloy_network::Optimism;
 use op_alloy_rpc_types::{OpTransactionReceipt, Transaction};
 use reth::revm::{db::Cache, state::EvmState};
 use reth_rpc_eth_api::RpcBlock;
+use std::sync::Arc;
 
 use crate::subscription::Flashblock;
 
@@ -25,7 +26,7 @@ pub struct PendingBlocksBuilder {
     transaction_receipts: HashMap<B256, OpTransactionReceipt>,
     transactions_by_hash: HashMap<B256, Transaction>,
     transaction_state: HashMap<B256, EvmState>,
-    state_overrides: Option<StateOverride>,
+    state_overrides: Option<Arc<StateOverride>>,
 
     db_cache: Cache,
 }
@@ -103,7 +104,7 @@ impl PendingBlocksBuilder {
 
     #[inline]
     pub(crate) fn with_state_overrides(&mut self, state_overrides: StateOverride) -> &Self {
-        self.state_overrides = Some(state_overrides);
+        self.state_overrides = Some(Arc::new(state_overrides));
         self
     }
 
@@ -142,7 +143,7 @@ pub struct PendingBlocks {
     transaction_receipts: HashMap<B256, OpTransactionReceipt>,
     transactions_by_hash: HashMap<B256, Transaction>,
     transaction_state: HashMap<B256, EvmState>,
-    state_overrides: Option<StateOverride>,
+    state_overrides: Option<Arc<StateOverride>>,
 
     db_cache: Cache,
 }
@@ -224,7 +225,7 @@ impl PendingBlocks {
     }
 
     pub fn get_state_overrides(&self) -> Option<StateOverride> {
-        self.state_overrides.clone()
+        self.state_overrides.as_ref().map(|arc| Arc::unwrap_or_clone(arc.clone()))
     }
 
     pub fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {

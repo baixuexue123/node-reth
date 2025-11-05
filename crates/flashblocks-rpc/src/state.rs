@@ -168,8 +168,7 @@ impl PendingBlocksAPI for Guard<Option<Arc<PendingBlocks>>> {
 
     fn get_state_overrides(&self) -> Option<StateOverride> {
         self.as_ref()
-            .map(|pb| pb.get_state_overrides())
-            .unwrap_or_default()
+            .and_then(|pb| pb.get_state_overrides())
     }
 
     fn get_pending_logs(&self, filter: &Filter) -> Vec<Log> {
@@ -236,8 +235,15 @@ where
                         block_number = flashblock.metadata.block_number,
                         flashblock_index = flashblock.index
                     );
-                    match self.process_flashblock(prev_pending_blocks, flashblock) {
-                        Ok(new_pending_blocks) => {
+                    
+                    // Execute in spawn_blocking to avoid blocking tokio executor
+                    let client = self.client.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        StateProcessor::process_flashblock_blocking(&client, prev_pending_blocks, flashblock)
+                    }).await;
+                    
+                    match result {
+                        Ok(Ok(new_pending_blocks)) => {
                             if new_pending_blocks.is_some() {
                                 _ = self.sender.send(new_pending_blocks.clone().unwrap())
                             }
@@ -247,8 +253,12 @@ where
                                 .block_processing_duration
                                 .record(start_time.elapsed());
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             error!(message = "could not process Flashblock", error = %e);
+                            self.metrics.block_processing_error.increment(1);
+                        }
+                        Err(e) => {
+                            error!(message = "spawn_blocking failed for flashblock processing", error = %e);
                             self.metrics.block_processing_error.increment(1);
                         }
                     }
@@ -309,16 +319,62 @@ where
                         self.metrics.pending_clear_reorg.increment(1);
 
                         // If there is a reorg, we re-process all future flashblocks without reusing the existing pending state
-                        return self.build_pending_state(None, &flashblocks);
+                        return Self::build_pending_state_static(&self.client, None, &flashblocks);
                     }
 
                     // If no reorg, we can continue building on top of the existing pending state
-                    self.build_pending_state(prev_pending_blocks, &flashblocks)
+                    Self::build_pending_state_static(&self.client, prev_pending_blocks, &flashblocks)
                 }
             }
             None => {
                 debug!(message = "no pending state to update with canonical block, skipping");
                 Ok(None)
+            }
+        }
+    }
+
+    // Static version for spawn_blocking
+    fn process_flashblock_blocking(
+        client: &Client,
+        prev_pending_blocks: Option<Arc<PendingBlocks>>,
+        flashblock: Flashblock,
+    ) -> eyre::Result<Option<Arc<PendingBlocks>>> {
+        match &prev_pending_blocks {
+            Some(pending_blocks) => {
+                if Self::is_next_flashblock_static(pending_blocks, &flashblock) {
+                    let mut flashblocks = pending_blocks.get_flashblocks();
+                    flashblocks.push(flashblock);
+                    Self::build_pending_state_static(client, prev_pending_blocks, &flashblocks)
+                } else if pending_blocks.latest_block_number() != flashblock.metadata.block_number {
+                    warn!(
+                        message = "Received non-zero index Flashblock for new block",
+                        curr_block = %pending_blocks.latest_block_number(),
+                        new_block = %flashblock.metadata.block_number,
+                    );
+                    Ok(None)
+                } else if pending_blocks.latest_flashblock_index() == flashblock.index {
+                    warn!(
+                        message = "Received duplicate Flashblock, ignoring",
+                        curr_block = %pending_blocks.latest_block_number(),
+                        flashblock_index = %flashblock.index,
+                    );
+                    Ok(prev_pending_blocks)
+                } else {
+                    error!(
+                        message = "Received non-sequential Flashblock",
+                        curr_block = %pending_blocks.latest_block_number(),
+                        new_block = %flashblock.metadata.block_number,
+                    );
+                    Ok(None)
+                }
+            }
+            None => {
+                if flashblock.index == 0 {
+                    Self::build_pending_state_static(client, None, &vec![flashblock])
+                } else {
+                    info!(message = "waiting for first Flashblock");
+                    Ok(None)
+                }
             }
         }
     }
@@ -335,7 +391,7 @@ where
                     // or the first flashblock for the next block
                     let mut flashblocks = pending_blocks.get_flashblocks();
                     flashblocks.push(flashblock);
-                    self.build_pending_state(prev_pending_blocks, &flashblocks)
+                    Self::build_pending_state_static(&self.client, prev_pending_blocks, &flashblocks)
                 } else if pending_blocks.latest_block_number() != flashblock.metadata.block_number {
                     // We have received a non-zero flashblock for a new block
                     self.metrics.unexpected_block_order.increment(1);
@@ -369,7 +425,7 @@ where
             }
             None => {
                 if flashblock.index == 0 {
-                    self.build_pending_state(None, &vec![flashblock])
+                    Self::build_pending_state_static(&self.client, None, &vec![flashblock])
                 } else {
                     info!(message = "waiting for first Flashblock");
                     Ok(None)
@@ -378,8 +434,9 @@ where
         }
     }
 
-    fn build_pending_state(
-        &self,
+    // Static version for spawn_blocking
+    fn build_pending_state_static(
+        client: &Client,
         prev_pending_blocks: Option<Arc<PendingBlocks>>,
         flashblocks: &Vec<Flashblock>,
     ) -> eyre::Result<Option<Arc<PendingBlocks>>> {
@@ -400,7 +457,7 @@ where
         let mut last_block_header = None;
         let max_retries = 5;
         for attempt in 0..max_retries {
-            match self.client.header_by_number(canonical_block)? {
+            match client.header_by_number(canonical_block)? {
                 Some(header) => {
                     if attempt > 0 {
                         debug!(
@@ -434,10 +491,9 @@ where
             max_retries
         ))?;
 
-        let evm_config = OpEvmConfig::optimism(self.client.chain_spec());
+        let evm_config = OpEvmConfig::optimism(client.chain_spec());
 
-        let state_provider = self
-            .client
+        let state_provider = client
             .state_by_block_number_or_tag(BlockNumberOrTag::Number(canonical_block))?;
         let state_provider_db = StateProviderDatabase::new(state_provider);
         let state = State::builder()
@@ -625,7 +681,7 @@ where
                 };
 
                 let op_receipt = OpReceiptBuilder::new(
-                    self.client.chain_spec().as_ref(),
+                    client.chain_spec().as_ref(),
                     input,
                     &mut l1_block_info,
                 )?
@@ -700,6 +756,20 @@ where
         pending_blocks_builder.with_db_cache(db.cache);
         pending_blocks_builder.with_state_overrides(state_overrides);
         Ok(Some(Arc::new(pending_blocks_builder.build()?)))
+    }
+
+    // Static version for spawn_blocking
+    fn is_next_flashblock_static(
+        pending_blocks: &Arc<PendingBlocks>,
+        flashblock: &Flashblock,
+    ) -> bool {
+        let is_next_of_block = flashblock.metadata.block_number
+            == pending_blocks.latest_block_number()
+            && flashblock.index == pending_blocks.latest_flashblock_index() + 1;
+        let is_first_of_next_block = flashblock.metadata.block_number
+            == pending_blocks.latest_block_number() + 1
+            && flashblock.index == 0;
+        is_next_of_block || is_first_of_next_block
     }
 
     fn is_next_flashblock(
