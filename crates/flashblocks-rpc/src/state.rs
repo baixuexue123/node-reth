@@ -219,12 +219,21 @@ where
                         message = "processing canonical block",
                         block_number = block.number
                     );
-                    match self.process_canonical_block(prev_pending_blocks, &block) {
-                        Ok(new_pending_blocks) => {
+                    // Execute in spawn_blocking to avoid blocking tokio executor
+                    let client = self.client.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        StateProcessor::process_canonical_block_blocking(&client, prev_pending_blocks, &block)
+                    }).await;
+                    
+                    match result {
+                        Ok(Ok(new_pending_blocks)) => {
                             self.pending_blocks.swap(new_pending_blocks);
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             error!(message = "could not process canonical block", error = %e);
+                        }
+                        Err(e) => {
+                            error!(message = "spawn_blocking failed for canonical block processing", error = %e);
                         }
                     }
                 }
@@ -263,6 +272,58 @@ where
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Static version for spawn_blocking
+    fn process_canonical_block_blocking(
+        client: &Client,
+        prev_pending_blocks: Option<Arc<PendingBlocks>>,
+        block: &RecoveredBlock<OpBlock>,
+    ) -> eyre::Result<Option<Arc<PendingBlocks>>> {
+        match &prev_pending_blocks {
+            Some(pending_blocks) => {
+                let mut flashblocks = pending_blocks.get_flashblocks();
+                // Note: metrics are skipped in blocking version for performance
+
+                if pending_blocks.latest_block_number() <= block.number {
+                    Ok(None)
+                } else {
+                    // If we had a reorg, we need to reset all flashblocks state
+                    let tracked_txns = pending_blocks.get_transactions_for_block(block.number);
+                    let tracked_txn_hashes: HashSet<_> =
+                        tracked_txns.iter().map(|tx| tx.tx_hash()).collect();
+                    let block_txn_hashes: HashSet<_> =
+                        block.body().transactions().map(|tx| tx.tx_hash()).collect();
+
+                    flashblocks
+                        .retain(|flashblock| flashblock.metadata.block_number > block.number);
+
+                    if tracked_txn_hashes.len() != block_txn_hashes.len()
+                        || tracked_txn_hashes != block_txn_hashes
+                    {
+                        debug!(
+                            message = "reorg detected, recomputing pending flashblocks going ahead of reorg",
+                            latest_pending_block = pending_blocks.latest_block_number(),
+                            canonical_block = block.number,
+                            tracked_txn_hashes_len = tracked_txn_hashes.len(),
+                            block_txn_hashes_len = block_txn_hashes.len(),
+                            tracked_txn_hashes = ?tracked_txn_hashes,
+                            block_txn_hashes = ?block_txn_hashes,
+                        );
+
+                        // If there is a reorg, we re-process all future flashblocks without reusing the existing pending state
+                        return Self::build_pending_state_static(client, None, &flashblocks);
+                    }
+
+                    // If no reorg, we can continue building on top of the existing pending state
+                    Self::build_pending_state_static(client, prev_pending_blocks, &flashblocks)
+                }
+            }
+            None => {
+                debug!(message = "no pending state to update with canonical block, skipping");
+                Ok(None)
             }
         }
     }
