@@ -440,60 +440,6 @@ where
         }
     }
 
-    fn process_flashblock(
-        &self,
-        prev_pending_blocks: Option<Arc<PendingBlocks>>,
-        flashblock: Flashblock,
-    ) -> eyre::Result<Option<Arc<PendingBlocks>>> {
-        match &prev_pending_blocks {
-            Some(pending_blocks) => {
-                if self.is_next_flashblock(pending_blocks, &flashblock) {
-                    // We have received the next flashblock for the current block
-                    // or the first flashblock for the next block
-                    let mut flashblocks = pending_blocks.get_flashblocks();
-                    flashblocks.push(flashblock);
-                    Self::build_pending_state_static(&self.client, prev_pending_blocks, &flashblocks)
-                } else if pending_blocks.latest_block_number() != flashblock.metadata.block_number {
-                    // We have received a non-zero flashblock for a new block
-                    self.metrics.unexpected_block_order.increment(1);
-                    error!(
-                        message = "Received non-zero index Flashblock for new block, zeroing Flashblocks until we receive a base Flashblock",
-                        curr_block = %pending_blocks.latest_block_number(),
-                        new_block = %flashblock.metadata.block_number,
-                    );
-                    Ok(None)
-                } else if pending_blocks.latest_flashblock_index() == flashblock.index {
-                    // We have received a duplicate flashblock for the current block
-                    self.metrics.unexpected_block_order.increment(1);
-                    warn!(
-                        message = "Received duplicate Flashblock for current block, ignoring",
-                        curr_block = %pending_blocks.latest_block_number(),
-                        flashblock_index = %flashblock.index,
-                    );
-                    Ok(prev_pending_blocks)
-                } else {
-                    // We have received a non-sequential flashblock for the current block
-                    self.metrics.unexpected_block_order.increment(1);
-
-                    error!(
-                        message = "Received non-sequential Flashblock for current block, zeroing Flashblocks until we receive a base Flashblock",
-                        curr_block = %pending_blocks.latest_block_number(),
-                        new_block = %flashblock.metadata.block_number,
-                    );
-
-                    Ok(None)
-                }
-            }
-            None => {
-                if flashblock.index == 0 {
-                    Self::build_pending_state_static(&self.client, None, &vec![flashblock])
-                } else {
-                    info!(message = "waiting for first Flashblock");
-                    Ok(None)
-                }
-            }
-        }
-    }
 
     // Static version for spawn_blocking
     fn build_pending_state_static(
@@ -833,18 +779,4 @@ where
         is_next_of_block || is_first_of_next_block
     }
 
-    fn is_next_flashblock(
-        &self,
-        pending_blocks: &Arc<PendingBlocks>,
-        flashblock: &Flashblock,
-    ) -> bool {
-        let is_next_of_block = flashblock.metadata.block_number
-            == pending_blocks.latest_block_number()
-            && flashblock.index == pending_blocks.latest_flashblock_index() + 1;
-        let is_first_of_next_block = flashblock.metadata.block_number
-            == pending_blocks.latest_block_number() + 1
-            && flashblock.index == 0;
-
-        is_next_of_block || is_first_of_next_block
-    }
 }
