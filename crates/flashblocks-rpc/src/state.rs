@@ -471,8 +471,8 @@ where
                 }
                 None => {
                     if attempt < max_retries - 1 {
-                        // Exponential backoff: 10, 20, 40, 80, but cap at 100ms
-                        let delay_ms = std::cmp::min(10 * (1 << attempt), 100);
+                        // Exponential backoff: 20, 40, 80, 100, but cap at 100ms
+                        let delay_ms = std::cmp::min(20 * (1 << attempt), 100);
                         debug!(
                             message = "canonical block header not yet available, retrying",
                             canonical_block = canonical_block,
