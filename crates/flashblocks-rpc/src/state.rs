@@ -394,43 +394,9 @@ where
 
         let earliest_block_number = flashblocks_per_block.keys().min().unwrap();
         let canonical_block = earliest_block_number - 1;
-
-        // Try to get the header with retries - the canonical block might not be fully committed yet
-        // Use exponential backoff: 5ms, 10ms, 20ms, 40ms, 80ms
-        let mut last_block_header = None;
-        let max_retries = 5;
-        for attempt in 0..max_retries {
-            match self.client.header_by_number(canonical_block)? {
-                Some(header) => {
-                    if attempt > 0 {
-                        debug!(
-                            message = "successfully retrieved canonical block header after retry",
-                            canonical_block = canonical_block,
-                            attempt = attempt + 1
-                        );
-                    }
-                    last_block_header = Some(header);
-                    break;
-                }
-                None => {
-                    if attempt < max_retries - 1 {
-                        let delay_ms = 5 * (1 << attempt); // Exponential backoff: 5, 10, 20, 40, 80 ms
-                        debug!(
-                            message = "canonical block header not yet available, retrying",
-                            canonical_block = canonical_block,
-                            attempt = attempt + 1,
-                            delay_ms = delay_ms
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                    }
-                }
-            }
-        }
-
-        let mut last_block_header = last_block_header.ok_or(eyre!(
-            "Failed to extract header for canonical block number {} after {} retries. This is okay if your node is not fully synced to tip yet.",
-            canonical_block,
-            max_retries
+        let mut last_block_header = self.client.header_by_number(canonical_block)?.ok_or(eyre!(
+            "Failed to extract header for canonical block number {}. This is okay if your node is not fully synced to tip yet.",
+            canonical_block
         ))?;
 
         let evm_config = OpEvmConfig::optimism(self.client.chain_spec());
