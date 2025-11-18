@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use crate::metrics::Metrics;
 use crate::pending_blocks::PendingBlocks;
-use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_eips::{BlockId, BlockNumberOrTag, Decodable2718};
 use alloy_primitives::map::foldhash::{HashSet, HashSetExt};
 use alloy_primitives::{Address, TxHash, U256, B256};
+use reth_optimism_primitives::OpTransactionSigned;
 use alloy_rpc_types::BlockOverrides;
 use alloy_rpc_types::simulate::{SimBlock, SimulatePayload, SimulatedBlock};
 use alloy_rpc_types::state::{EvmOverrides, StateOverride, StateOverridesBuilder};
@@ -641,10 +642,15 @@ where
                         filtered_receipts.insert(tx_hash.to_string(), receipt_with_filtered_logs);
                     }
 
-                    // Get transaction hashes from receipts keys
-                    let tx_hashes: Vec<String> = latest_flashblock.metadata.receipts
-                        .keys()
-                        .map(|hash| hash.to_string())
+                    // Get transaction hashes in order from transactions
+                    let tx_hashes: Vec<String> = latest_flashblock.diff.transactions
+                        .iter()
+                        .filter_map(|tx_bytes| {
+                            // Decode transaction and get hash
+                            OpTransactionSigned::decode_2718_exact(tx_bytes.as_ref())
+                                .ok()
+                                .map(|tx| tx.tx_hash().to_string())
+                        })
                         .collect();
 
                     let simplified = serde_json::json!({
