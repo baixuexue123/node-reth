@@ -6,7 +6,6 @@ use reth_db::{
     mdbx::{DatabaseArguments, KILOBYTE, MEGABYTE, MaxReadTransactionDuration},
     test_utils::{ERROR_DB_CREATION, TempDatabase, create_test_static_files_dir, tempdir_path},
 };
-
 use reth_provider::{ProviderFactory, providers::StaticFileProvider};
 
 pub fn create_test_provider_factory<N: NodeTypes>(
